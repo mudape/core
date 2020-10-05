@@ -16,6 +16,7 @@ import homeassistant.components.scene as scene
 from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON
 from homeassistant.core import Context, CoreState, callback
 from homeassistant.helpers import config_validation as cv, script
+from homeassistant.setup import async_setup_component
 import homeassistant.util.dt as dt_util
 
 from tests.async_mock import patch
@@ -1828,3 +1829,83 @@ async def test_set_redefines_variable(hass, caplog):
 
     assert mock_calls[0].data["value"] == "1"
     assert mock_calls[1].data["value"] == "2"
+
+
+async def test_validate_action_config(hass):
+    """Validate action config."""
+    configs = {
+        cv.SCRIPT_ACTION_CALL_SERVICE: {},
+        cv.SCRIPT_ACTION_DELAY: {},
+        cv.SCRIPT_ACTION_WAIT_TEMPLATE: {},
+        cv.SCRIPT_ACTION_FIRE_EVENT: {},
+        cv.SCRIPT_ACTION_CHECK_CONDITION: {},
+        cv.SCRIPT_ACTION_DEVICE_AUTOMATION: {},
+        cv.SCRIPT_ACTION_ACTIVATE_SCENE: {},
+        cv.SCRIPT_ACTION_REPEAT: {},
+        cv.SCRIPT_ACTION_CHOOSE: {},
+        cv.SCRIPT_ACTION_WAIT_FOR_TRIGGER: {},
+        cv.SCRIPT_ACTION_VARIABLES: {},
+    }
+
+    for key in cv.ACTION_TYPE_SCHEMAS:
+        assert key in configs, f"No validate config test found for {key}"
+
+    for action_type, config in configs.items():
+        try:
+            await script.async_validate_action_config(hass, config)
+        except vol.Invalid:
+            assert False, f"{action_type} config invalid"
+
+
+async def test_embedded_wait_for_trigger_in_automation(hass):
+    """Test an embedded wait for trigger."""
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": {
+                "trigger": {"platform": "event", "event_type": "test_event"},
+                "action": {
+                    "repeat": {
+                        "while": [
+                            {
+                                "condition": "template",
+                                "value_template": '{{ is_state("test.value1", "trigger-while") }}',
+                            }
+                        ],
+                        "sequence": [
+                            {"event": "trigger_wait_event"},
+                            {
+                                "wait_for_trigger": [
+                                    {
+                                        "platform": "template",
+                                        "value_template": '{{ is_state("test.value2", "trigger-wait") }}',
+                                    }
+                                ]
+                            },
+                            {"service": "test.script"},
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    hass.states.async_set("test.value1", "trigger-while")
+    hass.states.async_set("test.value2", "not-trigger-wait")
+    mock_calls = async_mock_service(hass, "test", "script")
+
+    async def trigger_wait_event(_):
+        # give script the time to attach the trigger.
+        await asyncio.sleep(0)
+        hass.states.async_set("test.value1", "not-trigger-while")
+        hass.states.async_set("test.value2", "trigger-wait")
+
+    hass.bus.async_listen("trigger_wait_event", trigger_wait_event)
+
+    # Start automation
+    hass.bus.async_fire("test_event")
+
+    await hass.async_block_till_done()
+
+    assert len(mock_calls) == 1
